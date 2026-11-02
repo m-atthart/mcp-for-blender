@@ -198,6 +198,40 @@ The addon starts its server when Blender opens. To check, press `N` in the 3D vi
 | **Code execution** | The AI writes Blender Python directly |
 | **Asset & model generation** | Poly Haven assets, Sketchfab models, Poly Pizza low-poly models, and AI-generated 3D models via Meshy, Tripo, Hyper3D Rodin and Hunyuan3D |
 
+### Streamable HTTP
+
+Stdio remains the default. To connect an MCP client by URL, run the MCP server
+on the same machine as Blender:
+
+```sh
+mcp-for-blender --transport streamable-http --http-host 127.0.0.1 --http-port 8000
+```
+
+Connect the client to `http://127.0.0.1:8000/mcp`. For another trusted device,
+bind to the Blender machine's LAN or VPN address instead. `--http-host` and
+`--http-port` configure the HTTP listener; `--host` and `--port` still select the
+Blender add-on socket (default `localhost:9876`). The add-on needs no changes.
+
+For a wildcard listener, explicitly allow the hostname or IP clients use:
+
+```sh
+mcp-for-blender --transport streamable-http --http-host 0.0.0.0 --http-port 8000 \
+  --http-allowed-host blender.local:8000
+```
+
+`--http-allowed-host` can be repeated for aliases. A hostname or IP without a
+port accepts any port; `HOST:PORT` restricts it to that port. The listen address
+and loopback hosts are accepted automatically, except
+that wildcard listen addresses require an explicit allowed host. Matching HTTP
+and HTTPS origins are accepted; other Host and Origin headers are rejected.
+These checks are not authentication. HTTP mode does not enable authentication;
+anyone who can reach an accepted endpoint can run Python in Blender. Use it on
+a trusted private network or behind authenticated HTTPS access.
+
+Use one client at a time to edit a Blender session. Long Blender operations
+block other requests. Screenshots and renders are returned as MCP image content;
+Blender and the MCP process must share a filesystem for temporary image files.
+
 ## Premium
 
 Generate AI 3D models (Meshy, Hunyuan3D, Tripo, Hyper3D Rodin) straight into Blender without bringing your own API keys. [More details](https://www.mcp-for-blender.com/premium?ref=readme)

@@ -14,7 +14,7 @@ import pytest
 from blender_mcp.server import (
     DEFAULT_HOST,
     DEFAULT_PORT,
-    parse_connection_args,
+    parse_server_args,
     resolve_connection,
 )
 
@@ -70,20 +70,23 @@ def test_empty_env_port_falls_back(monkeypatch):
 
 
 def test_parses_flags_from_argv():
-    assert parse_connection_args(["--host", "localhost", "--port", "9877"]) == (
+    args = parse_server_args(["--host", "localhost", "--port", "9877"])
+    assert (args.host, args.port) == (
         "localhost",
         9877,
     )
 
 
 def test_no_flags_yields_no_override():
-    assert parse_connection_args([]) == (None, None)
+    args = parse_server_args([])
+    assert (args.host, args.port) == (None, None)
 
 
 def test_unknown_args_are_ignored_not_fatal():
     # MCP clients may append their own arguments to the server command; an
     # unrecognised one must not stop the server from starting.
-    assert parse_connection_args(["--some-client-flag", "--port", "9877"]) == (
+    args = parse_server_args(["--some-client-flag", "--port", "9877"])
+    assert (args.host, args.port) == (
         None,
         9877,
     )
@@ -93,6 +96,6 @@ def test_mistyped_flag_is_reported(caplog):
     # --prot would otherwise be dropped in silence and the user would connect
     # to the default port, looking like the flag simply had no effect.
     with caplog.at_level("WARNING"):
-        host, port = parse_connection_args(["--prot", "9877"])
-    assert (host, port) == (None, None)
+        args = parse_server_args(["--prot", "9877"])
+    assert (args.host, args.port) == (None, None)
     assert "--prot" in caplog.text

@@ -24,6 +24,7 @@ from .addon_manager import (
     run_cli as run_addon_cli,
     EXPECTED_ADDON_PROTOCOL_VERSION,
     check_addon_status_on_startup,
+    add_server_arguments,
 )
 from .consent_prompt import maybe_prompt_for_consent
 from .premium_hint import premium_hint_once, premium_generation_guidance
@@ -46,6 +47,7 @@ from .openai_apps import (
     viewport_store,
 )
 from mcp.types import CallToolResult, ImageContent, ResourceLink, TextContent, ToolAnnotations
+from mcp.server.transport_security import TransportSecuritySettings
 from urllib.parse import quote, unquote
 
 # Configure logging
@@ -58,8 +60,8 @@ DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 9876
 
 
-def parse_connection_args(argv):
-    """Parse --host/--port out of argv, ignoring anything else.
+def parse_server_args(argv):
+    """Parse server options, preserving client-added arguments.
 
     parse_known_args is deliberate: MCP clients sometimes append their own
     arguments to the server command, and an unrecognised one must not abort
@@ -67,12 +69,35 @@ def parse_connection_args(argv):
     like --prot does not masquerade as "connected to the default port".
     """
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--host", default=None)
-    parser.add_argument("--port", type=int, default=None)
+    add_server_arguments(parser)
     args, unknown = parser.parse_known_args(argv)
     if unknown:
         logger.warning(f"Ignoring unrecognized command-line arguments: {unknown}")
-    return args.host, args.port
+    args.http_host = args.http_host.strip("[]")
+    if args.transport == "streamable-http":
+        if args.http_host in {"", "0.0.0.0", "::"} and not args.http_allowed_host:
+            parser.error("wildcard --http-host requires --http-allowed-host with the name or IP clients use")
+    return args
+
+
+def configure_http(args):
+    """Configure the SDK transport without weakening its Host/Origin checks."""
+    mcp.settings.host = args.http_host
+    mcp.settings.port = args.http_port
+    names = ["127.0.0.1", "localhost", "[::1]", *args.http_allowed_host]
+    if args.http_host not in {"", "0.0.0.0", "::"}:
+        names.append(args.http_host)
+    hosts = []
+    for name in names:
+        if name.count(":") > 1 and not name.startswith("["):
+            name = f"[{name}]"
+        hosts.append(name)
+        if ":" not in name or name.endswith("]"):
+            hosts.append(f"{name}:*")
+    mcp.settings.transport_security = TransportSecuritySettings(
+        allowed_hosts=hosts,
+        allowed_origins=[f"{scheme}://{host}" for host in hosts for scheme in ("http", "https")],
+    )
 
 
 def resolve_connection(cli_host=None, cli_port=None):
@@ -266,13 +291,21 @@ class BlenderConnection:
             self.sock = None
             raise Exception(f"Communication error with Blender: {str(e)}")
 
+_active_sessions = 0
+
+
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
-    """Manage server startup and shutdown lifecycle"""
+    """Keep shared Blender resources alive until the last MCP session exits."""
+    global _active_sessions, _blender_connection
+    _active_sessions += 1
     # We don't need to create a connection here since we're using the global connection
     # for resources and tools
 
     try:
+        if _active_sessions > 1:
+            yield {}
+            return
         # Just log that we're starting up
         logger.info("BlenderMCP server starting up")
 
@@ -305,21 +338,21 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         # Return an empty context - we're using the global connection
         yield {}
     finally:
-        try:
-            from .trajectory import get_trajectory_recorder
+        _active_sessions -= 1
+        if _active_sessions == 0:
+            try:
+                from .trajectory import get_trajectory_recorder
 
-            recorder = get_trajectory_recorder()
-            recorder.close_episode("session_end")
-            recorder.flush(2.0)
-        except Exception as e:
-            logger.debug(f"Episode close on shutdown skipped: {e}")
-        # Clean up the global connection on shutdown
-        global _blender_connection
-        if _blender_connection:
-            logger.info("Disconnecting from Blender on shutdown")
-            _blender_connection.disconnect()
-            _blender_connection = None
-        logger.info("BlenderMCP server shut down")
+                recorder = get_trajectory_recorder()
+                recorder.close_episode("session_end")
+                recorder.flush(2.0)
+            except Exception as e:
+                logger.debug(f"Episode close on shutdown skipped: {e}")
+            if _blender_connection:
+                logger.info("Disconnecting from Blender on shutdown")
+                _blender_connection.disconnect()
+                _blender_connection = None
+            logger.info("BlenderMCP server shut down")
 
 # Guidance delivered to clients in the `initialize` response. This is the only
 # guidance every client is sure to get: MCP prompts are user-invoked, and the
@@ -2257,12 +2290,16 @@ def main():
     """Run the MCP server, or addon install CLI subcommands."""
     global CLI_HOST, CLI_PORT
 
-    if len(sys.argv) > 1 and sys.argv[1] in {"install-addon", "addon-paths", "setup", "update", "-h", "--help"}:
+    if len(sys.argv) > 1 and (
+        sys.argv[1] in {"install-addon", "addon-paths", "setup", "update"}
+        or any(flag in sys.argv[1:] for flag in ("-h", "--help"))
+    ):
         code = run_addon_cli(sys.argv[1:])
         if code >= 0:
             raise SystemExit(code)
 
-    CLI_HOST, CLI_PORT = parse_connection_args(sys.argv[1:])
+    args = parse_server_args(sys.argv[1:])
+    CLI_HOST, CLI_PORT = args.host, args.port
 
     # When run by hand (stdin is a TTY) the server appears to "hang" while it
     # silently waits for an MCP client; log a hint so that state is obvious.
@@ -2272,7 +2309,7 @@ def main():
         interactive = sys.stdin.isatty()
     except (AttributeError, OSError):
         interactive = False
-    if interactive:
+    if interactive and args.transport == "stdio":
         logger.info(
             "BlenderMCP is an MCP server and is meant to be launched by your MCP "
             "client (Claude Desktop, Cursor, VS Code, ...), not run by hand. "
@@ -2282,7 +2319,12 @@ def main():
             "(if the addon is outdated this logs how to update it: uvx mcp-for-blender install-addon)"
         )
     context_log.install(mcp, SERVER_INSTRUCTIONS)
-    mcp.run()
+    if args.transport == "streamable-http":
+        configure_http(args)
+        logger.info("Starting Streamable HTTP on %s:%s/mcp", args.http_host, args.http_port)
+        mcp.run(transport="streamable-http")
+    else:
+        mcp.run()
 
 if __name__ == "__main__":
     main()

@@ -530,6 +530,35 @@ def format_handshake_log(result: AddonHandshake) -> str:
     return result.warning or "Blender addon may be outdated."
 
 
+def add_server_arguments(parser) -> None:
+    """Share server options between the entry point and installer help."""
+    parser.add_argument(
+        "--host", default=None,
+        help="Host of the Blender socket server (overrides BLENDER_HOST)",
+    )
+    parser.add_argument(
+        "--port", type=int, default=None,
+        help="Port of the Blender socket server (overrides BLENDER_PORT)",
+    )
+    parser.add_argument(
+        "--transport", choices=("stdio", "streamable-http"), default="stdio",
+        help="MCP transport (default: stdio)",
+    )
+    parser.add_argument(
+        "--http-host", default="127.0.0.1",
+        help="HTTP listen address (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--http-port", type=int, default=8000,
+        help="HTTP listen port (default: 8000)",
+    )
+    parser.add_argument(
+        "--http-allowed-host", action="append", default=[], metavar="HOST[:PORT]",
+        help="Additional HTTP hostname or IP to accept; repeat for aliases. "
+             "Required for wildcard listen addresses. Omit the port to allow any port.",
+    )
+
+
 def run_cli(argv: list[str] | None = None) -> int:
     """CLI entry for install-addon / addon-paths / setup / update. Returns process exit code."""
     import argparse
@@ -539,20 +568,9 @@ def run_cli(argv: list[str] | None = None) -> int:
         description="MCP for Blender server and addon installer",
     )
     # Declared here only so they show up in `mcp-for-blender --help`; the server
-    # entry point parses them itself (see server.parse_connection_args), since
+    # entry point parses them itself (see server.parse_server_args), since
     # this CLI returns -1 and exits before the no-subcommand case reaches them.
-    parser.add_argument(
-        "--host",
-        type=str,
-        default=None,
-        help="Host of the Blender socket server (overrides BLENDER_HOST)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="Port of the Blender socket server (overrides BLENDER_PORT)",
-    )
+    add_server_arguments(parser)
     sub = parser.add_subparsers(dest="command")
 
     install_p = sub.add_parser(
